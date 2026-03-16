@@ -117,11 +117,14 @@ public class LogitechProvider : IDeviceProvider
 
                     if (batteryResp != null)
                     {
-                        var bp = batteryResp.RootElement.GetProperty("payload");
-                        if (bp.TryGetProperty("percentage", out var pct))
-                            info.BatteryPercent = pct.GetInt32();
-                        if (bp.TryGetProperty("charging", out var chg))
-                            info.Charging = chg.GetBoolean();
+                        var root = batteryResp.RootElement;
+                        if (root.TryGetProperty("payload", out var bp))
+                        {
+                            if (bp.TryGetProperty("percentage", out var pct))
+                                info.BatteryPercent = pct.GetInt32();
+                            if (bp.TryGetProperty("charging", out var chg))
+                                info.Charging = chg.GetBoolean();
+                        }
                     }
                 }
                 catch (Exception ex)

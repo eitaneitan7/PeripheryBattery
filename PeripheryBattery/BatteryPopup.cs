@@ -23,7 +23,7 @@ public class BatteryPopup : Form
         Padding = new Padding(12);
         BackColor = Color.FromArgb(30, 30, 30);
         ForeColor = Color.White;
-        MaximumSize = new Size(350, 500);
+        MaximumSize = new Size(450, 500);
 
         // Round corners
         Region = null; // Will set after size is determined
@@ -119,9 +119,11 @@ public class BatteryPopup : Form
             BackColor = Color.Transparent,
         };
 
+        // Truncate long device names to keep the popup compact
+        var shortName = name.Length > 25 ? name[..25] + "…" : name;
         var nameLabel = new Label
         {
-            Text = name,
+            Text = shortName,
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
             Margin = new Padding(0, 6, 16, 4),
