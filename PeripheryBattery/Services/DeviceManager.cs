@@ -24,6 +24,7 @@ public class DeviceManager : IDisposable
         _config = config;
         _providers.Add(new LogitechProvider());
         _providers.Add(new RazerProvider());
+        _providers.Add(new CorsairProvider());
     }
 
     public async Task StartAsync()

@@ -18,4 +18,11 @@
     <EmbeddedResource Include="Resources\battery.ico" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Resources\iCUESDK.x64_2019.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>iCUESDK.x64_2019.dll</Link>
+    </Content>
+  </ItemGroup>
+
 </Project>
