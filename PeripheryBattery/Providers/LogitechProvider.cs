@@ -8,23 +8,16 @@ namespace PeripheryBattery.Providers;
 
 /// <summary>
 /// Reads battery data from Logitech G HUB via its local WebSocket at ws://localhost:9010.
-/// Uses subscriptions for real-time push updates on battery and device changes.
-/// Falls back to request/response polling if subscriptions fail.
+/// Simple request/response polling — no subscriptions, no background listener.
+/// Reconnects automatically if the connection drops.
 /// </summary>
 public class LogitechProvider : IDeviceProvider
 {
     public string Vendor => "Logitech";
-    public event Action? Changed;
 
     private const string GHubWsUrl = "ws://localhost:9010";
     private ClientWebSocket? _ws;
-    private readonly SemaphoreSlim _pollLock = new(1, 1);
     private List<DeviceInfo> _lastGoodDevices = new();
-    private CancellationTokenSource? _listenerCts;
-    private Task? _listenerTask;
-    private bool _subscribedBattery;
-    private bool _subscribedDevices;
-    private volatile bool _polling; // prevent Changed from re-entering
 
     private static readonly Dictionary<string, string> DeviceTypeKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -35,61 +28,33 @@ public class LogitechProvider : IDeviceProvider
         { "speaker", "Speaker" },
     };
 
-    public async Task StartAsync(CancellationToken ct)
-    {
-        try
-        {
-            await ConnectAsync(ct);
-            StartBackgroundListener();
-        }
-        catch (Exception ex)
-        {
-            Logger.Log($"[Logitech] Start failed (will retry on poll): {ex.Message}");
-        }
-    }
+    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
 
     public async Task StopAsync()
     {
-        _listenerCts?.Cancel();
-        if (_listenerTask != null)
-        {
-            try { await _listenerTask.WaitAsync(TimeSpan.FromSeconds(2)); }
-            catch { }
-        }
         await CloseWebSocket();
     }
 
     public async Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {
-        // Prevent concurrent polls (Razer file watcher can trigger mid-Logitech-poll)
-        if (!await _pollLock.WaitAsync(0, ct))
-        {
-            return _lastGoodDevices.ToList();
-        }
-
-        _polling = true;
         try
         {
-            await EnsureConnectedAsync(ct);
-            await EnsureSubscribedAsync(ct);
+            // Fresh connection each poll — simple, no stale state, no interleaved messages
+            await CloseWebSocket();
+            await ConnectAsync(ct);
 
             var deviceList = await SendAndReceiveAsync(new
             {
-                msgId = "list",
+                msgId = "",
                 verb = "GET",
                 path = "/devices/list"
             }, ct);
 
-            if (deviceList == null)
-            {
-                Logger.Log("[Logitech] No response from G HUB");
-                return _lastGoodDevices.ToList();
-            }
-
-            if (!deviceList.RootElement.TryGetProperty("payload", out var payload) ||
+            if (deviceList == null ||
+                !deviceList.RootElement.TryGetProperty("payload", out var payload) ||
                 !payload.TryGetProperty("deviceInfos", out var deviceInfos))
             {
-                Logger.Log("[Logitech] No deviceInfos in response");
+                Logger.Log("[Logitech] No device data from G HUB");
                 return _lastGoodDevices.ToList();
             }
 
@@ -128,7 +93,7 @@ public class LogitechProvider : IDeviceProvider
                 {
                     var batteryResp = await SendAndReceiveAsync(new
                     {
-                        msgId = "bat",
+                        msgId = "",
                         verb = "GET",
                         path = $"/battery/{deviceId}/state"
                     }, ct);
@@ -150,83 +115,18 @@ public class LogitechProvider : IDeviceProvider
                 results.Add(info);
             }
 
-            // Only update cache on success
             _lastGoodDevices = results;
             return results;
         }
         catch (Exception ex)
         {
             Logger.Log($"[Logitech] GetDevices failed: {ex.Message}");
-            await CloseWebSocket();
-            // Return last good state instead of marking everything disconnected
             return _lastGoodDevices.ToList();
         }
-        finally
-        {
-            _polling = false;
-            _pollLock.Release();
-        }
-    }
-
-    private async Task EnsureSubscribedAsync(CancellationToken ct)
-    {
-        if (_subscribedBattery && _subscribedDevices) return;
-
-        try
-        {
-            if (!_subscribedBattery)
-            {
-                await SendFireAndForgetAsync(new { msgId = "sub-bat", verb = "SUBSCRIBE", path = "/battery/state/changed" }, ct);
-                _subscribedBattery = true;
-                Logger.Log("[Logitech] Subscribed to battery changes");
-            }
-            if (!_subscribedDevices)
-            {
-                await SendFireAndForgetAsync(new { msgId = "sub-dev", verb = "SUBSCRIBE", path = "/devices/state/changed" }, ct);
-                _subscribedDevices = true;
-                Logger.Log("[Logitech] Subscribed to device changes");
-            }
-        }
-        catch (Exception ex)
-        {
-            Logger.Log($"[Logitech] Subscribe failed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Background task that listens for push messages from G HUB (subscription events).
-    /// When a battery or device change is received, fires Changed to trigger a re-poll.
-    /// </summary>
-    private void StartBackgroundListener()
-    {
-        _listenerCts = new CancellationTokenSource();
-        var ct = _listenerCts.Token;
-
-        _listenerTask = Task.Run(async () =>
-        {
-            Logger.Log("[Logitech] Background listener started");
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    // We only listen here — the main poll thread sends requests
-                    // and reads immediate responses. This catches async push events.
-                    await Task.Delay(500, ct); // Small delay to avoid tight loop
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[Logitech] Listener error: {ex.Message}");
-                    await Task.Delay(5000, ct);
-                }
-            }
-            Logger.Log("[Logitech] Background listener stopped");
-        }, ct);
     }
 
     private async Task ConnectAsync(CancellationToken ct)
     {
-        await CloseWebSocket();
         _ws = new ClientWebSocket();
         _ws.Options.AddSubProtocol("json");
         _ws.Options.SetRequestHeader("Origin", "file://");
@@ -234,32 +134,24 @@ public class LogitechProvider : IDeviceProvider
         _ws.Options.SetRequestHeader("Pragma", "no-cache");
 
         await _ws.ConnectAsync(new Uri(GHubWsUrl), ct);
-        Logger.Log("[Logitech] Connected to G HUB WebSocket");
 
-        // Consume the OPTIONS handshake
-        var handshake = await ReceiveFullMessageAsync(ct);
-        Logger.Log($"[Logitech] Handshake consumed");
-
-        // Reset subscription state on new connection
-        _subscribedBattery = false;
-        _subscribedDevices = false;
-    }
-
-    private async Task EnsureConnectedAsync(CancellationToken ct)
-    {
-        if (_ws is not { State: WebSocketState.Open })
-            await ConnectAsync(ct);
+        // Consume the OPTIONS handshake G HUB sends on connect
+        await ReceiveFullMessageAsync(ct);
     }
 
     private async Task CloseWebSocket()
     {
-        if (_ws is { State: WebSocketState.Open })
+        if (_ws != null)
         {
-            try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
+            try
+            {
+                if (_ws.State == WebSocketState.Open)
+                    await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+            }
             catch { }
+            _ws.Dispose();
+            _ws = null;
         }
-        _ws?.Dispose();
-        _ws = null;
     }
 
     private async Task<string?> ReceiveFullMessageAsync(CancellationToken ct)
@@ -288,41 +180,11 @@ public class LogitechProvider : IDeviceProvider
         var json = JsonSerializer.Serialize(request);
         await _ws!.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
 
-        // Read responses, skipping any subscription push messages until we get our reply
-        for (int i = 0; i < 10; i++) // max 10 attempts to find our response
-        {
-            var responseJson = await ReceiveFullMessageAsync(ct);
-            if (responseJson == null) return null;
+        var responseJson = await ReceiveFullMessageAsync(ct);
+        if (responseJson == null) return null;
 
-            var doc = JsonDocument.Parse(responseJson);
-            var root = doc.RootElement;
-
-            // Check if this is a subscription push event — skip it and keep reading
-            var verb = root.TryGetProperty("verb", out var v) ? v.GetString() : "";
-            if (verb == "CYCLIC" || verb == "CYCLED")
-            {
-                Logger.Log($"[Logitech] Push event received (skipping): {verb}");
-                doc.Dispose();
-                // Only fire Changed if we're not already mid-poll (avoid reentrant loop)
-                if (!_polling)
-                    Changed?.Invoke();
-                continue;
-            }
-
-            return doc;
-        }
-
-        return null;
+        return JsonDocument.Parse(responseJson);
     }
-
-    private async Task SendFireAndForgetAsync(object request, CancellationToken ct)
-    {
-        if (_ws is not { State: WebSocketState.Open }) return;
-        var json = JsonSerializer.Serialize(request);
-        await _ws!.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
-    }
-
-
 
     private static string ClassifyDevice(string name)
     {

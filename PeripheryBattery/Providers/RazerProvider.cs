@@ -13,10 +13,8 @@ namespace PeripheryBattery.Providers;
 public class RazerProvider : IDeviceProvider
 {
     public string Vendor => "Razer";
-    public event Action? Changed;
 
     private readonly List<DeviceInfo> _lastKnown = new();
-    private FileSystemWatcher? _watcher;
 
     private static readonly string Synapse3LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -38,64 +36,8 @@ public class RazerProvider : IDeviceProvider
         @"^\[(?<timestamp>.+?)\].*connectingDeviceData:\s*(?<json>.+)$",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
-    public Task StartAsync(CancellationToken ct)
-    {
-        SetupFileWatcher();
-        return Task.CompletedTask;
-    }
-
-    public Task StopAsync()
-    {
-        _watcher?.Dispose();
-        _watcher = null;
-        return Task.CompletedTask;
-    }
-
-    private void SetupFileWatcher()
-    {
-        // Watch whichever Synapse log directory exists
-        string? watchPath = null;
-        string? watchFile = null;
-
-        if (File.Exists(Synapse4LogPath))
-        {
-            watchPath = Path.GetDirectoryName(Synapse4LogPath);
-            watchFile = Path.GetFileName(Synapse4LogPath);
-        }
-        else if (File.Exists(Synapse3LogPath))
-        {
-            watchPath = Path.GetDirectoryName(Synapse3LogPath);
-            watchFile = Path.GetFileName(Synapse3LogPath);
-        }
-
-        if (watchPath == null || watchFile == null) return;
-
-        try
-        {
-            _watcher = new FileSystemWatcher(watchPath, watchFile)
-            {
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
-                EnableRaisingEvents = true,
-            };
-
-            // Debounce: Synapse writes frequently, we don't need to react to every byte
-            DateTime lastFired = DateTime.MinValue;
-            _watcher.Changed += (_, _) =>
-            {
-                var now = DateTime.Now;
-                if ((now - lastFired).TotalSeconds < 3) return;
-                lastFired = now;
-                Logger.Log("[Razer] Log file changed, triggering update");
-                Changed?.Invoke();
-            };
-
-            Logger.Log($"[Razer] Watching {Path.Combine(watchPath, watchFile)} for changes");
-        }
-        catch (Exception ex)
-        {
-            Logger.Log($"[Razer] FileSystemWatcher setup failed: {ex.Message}");
-        }
-    }
+    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+    public Task StopAsync() => Task.CompletedTask;
 
     public Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {

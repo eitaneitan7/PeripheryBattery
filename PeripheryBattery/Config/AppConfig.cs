@@ -5,7 +5,7 @@ namespace PeripheryBattery.Config;
 
 public class AppConfig
 {
-    public int PollIntervalSeconds { get; set; } = 60;
+    public int PollIntervalSeconds { get; set; } = 5;
     public int LowBatteryThreshold { get; set; } = 20;
     public bool ShowNotifications { get; set; } = true;
     public bool StartWithWindows { get; set; } = false;
