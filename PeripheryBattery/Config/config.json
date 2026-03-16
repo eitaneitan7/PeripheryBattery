@@ -1,0 +1,7 @@
+{
+  "PollIntervalSeconds": 60,
+  "LowBatteryThreshold": 20,
+  "ShowNotifications": true,
+  "StartWithWindows": false,
+  "DeviceNameOverrides": {}
+}
