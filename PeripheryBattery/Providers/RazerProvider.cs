@@ -7,8 +7,9 @@ namespace PeripheryBattery.Providers;
 
 /// <summary>
 /// Reads battery data from Razer Synapse log files.
-/// Supports both Synapse 3 and Synapse 4 log formats.
-/// Uses FileSystemWatcher for near-instant detection of log changes.
+/// Synapse 4: reads per-device product logs (products_*_mw *.log) for real-time battery.
+/// Synapse 3: reads main log for battery level change events.
+/// Falls back to systray_systrayv2.log connectingDeviceData if product logs unavailable.
 /// </summary>
 public class RazerProvider : IDeviceProvider
 {
@@ -16,32 +17,38 @@ public class RazerProvider : IDeviceProvider
 
     private readonly List<DeviceInfo> _lastKnown = new();
     private bool _loggedNotFound;
+    private bool _loggedFirstPoll;
 
+    // Synapse 4 logs directory
+    private static readonly string Synapse4LogDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Razer", "RazerAppEngine", "User Data", "Logs");
+
+    // Synapse 3 log
     private static readonly string Synapse3LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Razer", "Synapse3", "Log", "Razer Synapse 3.log");
 
-    private static readonly string Synapse4LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Razer", "RazerAppEngine", "User Data", "Logs", "systray_systrayv2.log");
+    // Synapse 4 product log: GET_BATTERY_STATE JSON
+    // Pattern: [updateUI] GET_BATTERY_STATE {"chargingStatus":"...","level":54,...}
+    private static readonly Regex S4ProductBatteryRegex = new(
+        @"GET_BATTERY_STATE\s+(?<json>\{[^}]+\})",
+        RegexOptions.Compiled);
 
+    // Synapse 4 systray: connectingDeviceData (fallback, may be stale)
+    private static readonly Regex S4SystrayBatteryRegex = new(
+        @"^\[(?<timestamp>.+?)\].*connectingDeviceData:\s*(?<json>.+)$",
+        RegexOptions.Multiline | RegexOptions.Compiled);
+
+    // Synapse 3: battery level change event
     private static readonly Regex S3BatteryRegex = new(
         @"^(?<dateTime>.+?)\s+INFO.+?_OnBatteryLevelChanged[\s\S]*?Name:\s*(?<name>.*?)[\r\n][\s\S]*?Handle:\s*(?<handle>\d+)[\s\S]*?level\s+(?<level>\d+)\s+state\s+(?<isCharging>\d+)",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
+    // Synapse 3: simple fallback
     private static readonly Regex S3SimpleBatteryRegex = new(
         @"level\s+(?<level>\d+)\s+state\s+(?<isCharging>\d+)",
         RegexOptions.Compiled);
-
-    // Synapse 4: full device data dump (has battery in JSON)
-    private static readonly Regex S4BatteryRegex = new(
-        @"^\[(?<timestamp>.+?)\].*connectingDeviceData:\s*(?<json>.+)$",
-        RegexOptions.Multiline | RegexOptions.Compiled);
-
-    // Synapse 4: individual battery level update lines
-    private static readonly Regex S4BatteryUpdateRegex = new(
-        @"(?:battery|power).*?level.*?(?<level>\d{1,3})",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
     public Task StopAsync() => Task.CompletedTask;
@@ -50,9 +57,24 @@ public class RazerProvider : IDeviceProvider
     {
         try
         {
-            if (File.Exists(Synapse4LogPath))
-                return Task.FromResult(ParseSynapse4Log());
+            // Try Synapse 4 product logs first (most accurate, real-time)
+            if (Directory.Exists(Synapse4LogDir))
+            {
+                var s4Result = ParseSynapse4ProductLogs();
+                if (s4Result.Count > 0)
+                    return Task.FromResult(s4Result);
 
+                // Fallback: try systray log
+                var systrayLog = Path.Combine(Synapse4LogDir, "systray_systrayv2.log");
+                if (File.Exists(systrayLog))
+                {
+                    var fallback = ParseSynapse4SystrayLog(systrayLog);
+                    if (fallback.Count > 0)
+                        return Task.FromResult(fallback);
+                }
+            }
+
+            // Try Synapse 3
             if (File.Exists(Synapse3LogPath))
                 return Task.FromResult(ParseSynapse3Log());
 
@@ -65,91 +87,131 @@ public class RazerProvider : IDeviceProvider
         }
         catch (Exception ex)
         {
-            Logger.Log($"[Razer] Error reading battery data: {ex.Message}");
-            return Task.FromResult(ReturnError(ex.Message));
+            Logger.Log($"[Razer] Error: {ex.Message}");
+            return Task.FromResult(_lastKnown.ToList());
         }
     }
 
-    private List<DeviceInfo> ParseSynapse3Log()
+    /// <summary>
+    /// Scans all products_*_mw *.log files for GET_BATTERY_STATE entries.
+    /// These have real-time battery data updated every ~2.5 minutes by Synapse.
+    /// </summary>
+    private List<DeviceInfo> ParseSynapse4ProductLogs()
     {
-        var content = ReadLogFileSafe(Synapse3LogPath);
-        if (content == null) return ReturnError("Cannot read Synapse 3 log");
+        var results = new List<DeviceInfo>();
 
-        var matches = S3BatteryRegex.Matches(content);
-        if (matches.Count > 0)
+        string[] productLogs;
+        try
         {
-            var deviceMap = new Dictionary<string, DeviceInfo>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (Match m in matches)
-            {
-                var name = m.Groups["name"].Value.Trim();
-                var level = int.Parse(m.Groups["level"].Value);
-                var charging = m.Groups["isCharging"].Value != "0";
-
-                deviceMap[name] = new DeviceInfo
-                {
-                    Id = $"razer-s3-{name.GetHashCode():x8}",
-                    Vendor = "Razer",
-                    DeviceType = ClassifyRazerDevice(name),
-                    DisplayName = name,
-                    BatteryPercent = Math.Clamp(level, 0, 100),
-                    Charging = charging,
-                    Connected = true,
-                    Source = "SynapseLog-V3",
-                    LastUpdated = DateTime.Now,
-                };
-            }
-
-            _lastKnown.Clear();
-            _lastKnown.AddRange(deviceMap.Values);
-            return _lastKnown.ToList();
+            productLogs = Directory.GetFiles(Synapse4LogDir, "products_*_mw *.log");
+        }
+        catch
+        {
+            return results;
         }
 
-        var simpleMatches = S3SimpleBatteryRegex.Matches(content);
-        if (simpleMatches.Count > 0)
-        {
-            var last = simpleMatches[^1];
-            var level = int.Parse(last.Groups["level"].Value);
-            var charging = last.Groups["isCharging"].Value != "0";
+        if (!_loggedFirstPoll && productLogs.Length > 0)
+            Logger.Log($"[Razer] Found {productLogs.Length} product log file(s)");
 
-            return new List<DeviceInfo>
+        foreach (var logPath in productLogs)
+        {
+            var content = ReadLogFileSafe(logPath);
+            if (content == null) continue;
+
+            var matches = S4ProductBatteryRegex.Matches(content);
+            if (matches.Count == 0) continue;
+
+            // Take the last (most recent) battery entry
+            var lastMatch = matches[^1];
+            var jsonStr = lastMatch.Groups["json"].Value;
+
+            try
             {
-                new()
+                using var doc = JsonDocument.Parse(jsonStr);
+                var root = doc.RootElement;
+
+                int? level = null;
+                var charging = false;
+                string? chargingRaw = null;
+
+                if (root.TryGetProperty("level", out var lv))
+                    level = lv.GetInt32();
+                if (root.TryGetProperty("chargingStatus", out var cs))
                 {
-                    Id = "razer-s3-default",
-                    Vendor = "Razer",
-                    DeviceType = "Mouse",
-                    DisplayName = "Razer Device",
-                    BatteryPercent = Math.Clamp(level, 0, 100),
-                    Charging = charging,
-                    Connected = true,
-                    Source = "SynapseLog-V3",
-                    LastUpdated = DateTime.Now,
+                    chargingRaw = cs.GetString();
+                    charging = chargingRaw != null
+                        && chargingRaw.Contains("Charging", StringComparison.OrdinalIgnoreCase)
+                        && !chargingRaw.Contains("NoCharge", StringComparison.OrdinalIgnoreCase);
                 }
-            };
+
+                if (level == null) continue;
+
+                // Extract device name from log filename or from connectingDeviceData in systray
+                // Filename format: products_<pid>_mw {<guid>}.log
+                var fileName = Path.GetFileName(logPath);
+                var deviceName = ExtractDeviceNameFromProductLog(content) ?? $"Razer Device ({fileName})";
+
+                if (!_loggedFirstPoll)
+                    Logger.Log($"[Razer] Product log: {fileName} -> name=\"{deviceName}\" level={level} charging=\"{chargingRaw}\"");
+
+                results.Add(new DeviceInfo
+                {
+                    Id = $"razer-s4-{fileName.GetHashCode():x8}",
+                    Vendor = "Razer",
+                    DeviceType = ClassifyRazerDevice(deviceName),
+                    DisplayName = deviceName,
+                    BatteryPercent = Math.Clamp(level.Value, 0, 100),
+                    Charging = charging,
+                    Connected = true,
+                    Source = "SynapseLog-V4-Product",
+                    LastUpdated = DateTime.Now,
+                });
+            }
+            catch (JsonException ex)
+            {
+                if (!_loggedFirstPoll)
+                    Logger.Log($"[Razer] JSON parse error in {Path.GetFileName(logPath)}: {ex.Message}");
+            }
         }
 
-        return ReturnError("No battery data in Synapse 3 log");
+        _loggedFirstPoll = true;
+
+        if (results.Count > 0)
+        {
+            _lastKnown.Clear();
+            _lastKnown.AddRange(results);
+        }
+
+        return results;
     }
 
-    private bool _loggedFirstRazerPoll;
-
-    private List<DeviceInfo> ParseSynapse4Log()
+    /// <summary>
+    /// Tries to find the device name from the product log content.
+    /// Looks for patterns like "deviceName" or product identifiers.
+    /// </summary>
+    private static string? ExtractDeviceNameFromProductLog(string content)
     {
-        var content = ReadLogFileSafe(Synapse4LogPath);
-        if (content == null) return ReturnError("Cannot read Synapse 4 log");
+        // Look for "name":"Razer ..." in the log
+        var nameMatch = Regex.Match(content, @"""name""\s*:\s*""(Razer[^""]+)""", RegexOptions.IgnoreCase);
+        if (nameMatch.Success) return nameMatch.Groups[1].Value;
 
-        var matches = S4BatteryRegex.Matches(content);
-        if (matches.Count == 0)
-            return ReturnError("No battery data in Synapse 4 log");
+        // Look for common Razer device name patterns
+        var deviceMatch = Regex.Match(content, @"((?:Razer\s+)?(?:DeathAdder|Viper|Basilisk|Mamba|Naga|Orochi|Cobra|Huntsman|BlackWidow|Kraken|BlackShark|Barracuda)[^""',\]\}]*)", RegexOptions.IgnoreCase);
+        if (deviceMatch.Success) return deviceMatch.Groups[1].Value.Trim();
 
-        // Log what we're matching on first poll
-        if (!_loggedFirstRazerPoll)
-        {
-            Logger.Log($"[Razer] Synapse 4: found {matches.Count} connectingDeviceData entries");
-            var lastLine = matches[^1].Value;
-            Logger.Log($"[Razer] Last entry (first 500 chars): {lastLine[..Math.Min(lastLine.Length, 500)]}");
-        }
+        return null;
+    }
+
+    /// <summary>
+    /// Fallback: parse systray_systrayv2.log connectingDeviceData (may have stale battery).
+    /// </summary>
+    private List<DeviceInfo> ParseSynapse4SystrayLog(string path)
+    {
+        var content = ReadLogFileSafe(path);
+        if (content == null) return new List<DeviceInfo>();
+
+        var matches = S4SystrayBatteryRegex.Matches(content);
+        if (matches.Count == 0) return new List<DeviceInfo>();
 
         var lastMatch = matches[^1];
         var jsonStr = lastMatch.Groups["json"].Value.Trim();
@@ -173,27 +235,22 @@ public class RazerProvider : IDeviceProvider
                 if (dev.TryGetProperty("name", out var nameObj))
                 {
                     name = nameObj.TryGetProperty("en", out var en)
-                        ? en.GetString() ?? ""
-                        : nameObj.GetString() ?? "";
+                        ? en.GetString() ?? "" : nameObj.GetString() ?? "";
                 }
 
                 int? level = null;
                 var charging = false;
-                string? chargingRaw = null;
                 if (dev.TryGetProperty("powerStatus", out var ps))
                 {
-                    if (ps.TryGetProperty("level", out var lv))
-                        level = lv.GetInt32();
+                    if (ps.TryGetProperty("level", out var lv)) level = lv.GetInt32();
                     if (ps.TryGetProperty("chargingStatus", out var cs))
                     {
-                        chargingRaw = cs.GetString();
-                        charging = chargingRaw?.Contains("Charging", StringComparison.OrdinalIgnoreCase) == true
-                                   && chargingRaw != "NoCharge_BatteryFull";
+                        var raw = cs.GetString();
+                        charging = raw != null
+                            && raw.Contains("Charging", StringComparison.OrdinalIgnoreCase)
+                            && !raw.Contains("NoCharge", StringComparison.OrdinalIgnoreCase);
                     }
                 }
-
-                if (!_loggedFirstRazerPoll)
-                    Logger.Log($"[Razer] Parsed device: name=\"{name}\" level={level} chargingStatus=\"{chargingRaw}\"");
 
                 devices.Add(new DeviceInfo
                 {
@@ -204,27 +261,74 @@ public class RazerProvider : IDeviceProvider
                     BatteryPercent = level.HasValue ? Math.Clamp(level.Value, 0, 100) : null,
                     Charging = charging,
                     Connected = true,
-                    Source = "SynapseLog-V4",
+                    Source = "SynapseLog-V4-Systray",
                     LastUpdated = DateTime.Now,
                 });
             }
-
-            _loggedFirstRazerPoll = true;
 
             if (devices.Count > 0)
             {
                 _lastKnown.Clear();
                 _lastKnown.AddRange(devices);
-                return devices;
             }
-
-            return ReturnError("No battery-capable devices in Synapse 4 log");
+            return devices;
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            Logger.Log($"[Razer] JSON parse error: {ex.Message}");
-            return ReturnError("Failed to parse Synapse 4 battery JSON");
+            return new List<DeviceInfo>();
         }
+    }
+
+    private List<DeviceInfo> ParseSynapse3Log()
+    {
+        var content = ReadLogFileSafe(Synapse3LogPath);
+        if (content == null) return new List<DeviceInfo>();
+
+        var matches = S3BatteryRegex.Matches(content);
+        if (matches.Count > 0)
+        {
+            var deviceMap = new Dictionary<string, DeviceInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match m in matches)
+            {
+                var name = m.Groups["name"].Value.Trim();
+                var level = int.Parse(m.Groups["level"].Value);
+                var charging = m.Groups["isCharging"].Value != "0";
+                deviceMap[name] = new DeviceInfo
+                {
+                    Id = $"razer-s3-{name.GetHashCode():x8}",
+                    Vendor = "Razer",
+                    DeviceType = ClassifyRazerDevice(name),
+                    DisplayName = name,
+                    BatteryPercent = Math.Clamp(level, 0, 100),
+                    Charging = charging,
+                    Connected = true,
+                    Source = "SynapseLog-V3",
+                    LastUpdated = DateTime.Now,
+                };
+            }
+            _lastKnown.Clear();
+            _lastKnown.AddRange(deviceMap.Values);
+            return _lastKnown.ToList();
+        }
+
+        var simpleMatches = S3SimpleBatteryRegex.Matches(content);
+        if (simpleMatches.Count > 0)
+        {
+            var last = simpleMatches[^1];
+            return new List<DeviceInfo>
+            {
+                new()
+                {
+                    Id = "razer-s3-default", Vendor = "Razer", DeviceType = "Mouse",
+                    DisplayName = "Razer Device",
+                    BatteryPercent = Math.Clamp(int.Parse(last.Groups["level"].Value), 0, 100),
+                    Charging = last.Groups["isCharging"].Value != "0",
+                    Connected = true, Source = "SynapseLog-V3", LastUpdated = DateTime.Now,
+                }
+            };
+        }
+
+        return new List<DeviceInfo>();
     }
 
     private static string? ReadLogFileSafe(string path)
@@ -233,16 +337,11 @@ public class RazerProvider : IDeviceProvider
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             const int maxRead = 512 * 1024;
-            if (fs.Length > maxRead)
-                fs.Seek(-maxRead, SeekOrigin.End);
+            if (fs.Length > maxRead) fs.Seek(-maxRead, SeekOrigin.End);
             using var reader = new StreamReader(fs);
             return reader.ReadToEnd();
         }
-        catch (Exception ex)
-        {
-            Logger.Log($"[Razer] Failed to read {path}: {ex.Message}");
-            return null;
-        }
+        catch { return null; }
     }
 
     private static string ClassifyRazerDevice(string name)
@@ -259,18 +358,5 @@ public class RazerProvider : IDeviceProvider
             lower.Contains("blackshark") || lower.Contains("barracuda") || lower.Contains("opus"))
             return "Headset";
         return "Unknown";
-    }
-
-    private string? _lastError;
-
-    private List<DeviceInfo> ReturnError(string error)
-    {
-        // Only log if the error message changed
-        if (error != _lastError)
-        {
-            Logger.Log($"[Razer] {error}");
-            _lastError = error;
-        }
-        return new List<DeviceInfo>();
     }
 }

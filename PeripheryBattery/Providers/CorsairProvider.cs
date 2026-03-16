@@ -269,7 +269,8 @@ public class CorsairProvider : IDeviceProvider
                         }
 
                         info.BatteryPercent = Math.Clamp(battery, 0, 100);
-                        Logger.Log($"[Corsair] {dev.model}: battery={info.BatteryPercent}%");
+                        if (!_loggedFirstPoll)
+                            Logger.Log($"[Corsair] {dev.model}: battery={info.BatteryPercent}%");
                         CorsairFreeProperty(ref prop);
                     }
                     else
