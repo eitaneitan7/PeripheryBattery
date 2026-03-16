@@ -63,11 +63,10 @@ public class DeviceManager : IDisposable
             try
             {
                 var devices = await provider.GetDevicesAsync(_cts?.Token ?? CancellationToken.None);
-                // Apply friendly name overrides from config
+                // Apply friendly name overrides (substring matching)
                 foreach (var d in devices)
                 {
-                    if (_config.DeviceNameOverrides.TryGetValue(d.DisplayName, out var friendly))
-                        d.DisplayName = friendly;
+                    d.DisplayName = _config.ApplyNameOverride(d.DisplayName);
                 }
                 allDevices.AddRange(devices);
             }

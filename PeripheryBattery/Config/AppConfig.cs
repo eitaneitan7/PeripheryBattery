@@ -9,10 +9,15 @@ public class AppConfig
     public int LowBatteryThreshold { get; set; } = 20;
     public bool ShowNotifications { get; set; } = true;
     public bool StartWithWindows { get; set; } = false;
+    public int IconCycleSeconds { get; set; } = 3;
 
-    // Device name overrides: map detected name -> friendly name
-    // e.g. "G915 TKL LIGHTSPEED Wireless RGB Mechanical Gaming Keyboard" -> "Keyboard"
-    public Dictionary<string, string> DeviceNameOverrides { get; set; } = new();
+    // Device name overrides: map detected name substring -> friendly name
+    public Dictionary<string, string> DeviceNameOverrides { get; set; } = new()
+    {
+        { "DeathAdder", "DeathAdder V3 Pro" },
+        { "G915 TKL", "G915 TKL" },
+        { "PRO X 2", "PRO X 2 Headset" },
+    };
 
     private static readonly string ConfigDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -42,7 +47,6 @@ public class AppConfig
             Logger.Log($"[Config] Failed to load: {ex.Message}");
         }
 
-        // Create default config
         var config = new AppConfig();
         config.Save();
         return config;
@@ -60,6 +64,19 @@ public class AppConfig
         {
             Logger.Log($"[Config] Failed to save: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Applies name overrides: if any key is a substring of the original name, replace it.
+    /// </summary>
+    public string ApplyNameOverride(string originalName)
+    {
+        foreach (var (pattern, friendly) in DeviceNameOverrides)
+        {
+            if (originalName.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                return friendly;
+        }
+        return originalName;
     }
 
     public static string ConfigFilePath => ConfigFile;

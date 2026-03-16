@@ -5,66 +5,33 @@ namespace PeripheryBattery;
 /// <summary>
 /// Compact borderless popup that shows battery status for all devices.
 /// Appears near the system tray when the tray icon is clicked.
+/// Dark themed with color-coded battery bars.
 /// </summary>
 public class BatteryPopup : Form
 {
-    private readonly TableLayoutPanel _table;
-    private readonly Label _titleLabel;
+    private readonly Panel _contentPanel;
 
     public BatteryPopup()
     {
-        // Borderless, compact, tool-window style (doesn't show in taskbar/alt-tab)
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
-        BackColor = Color.FromArgb(30, 30, 30);
+        BackColor = Color.FromArgb(28, 28, 32);
         ForeColor = Color.White;
-        MaximumSize = new Size(450, 500);
+        Size = new Size(280, 10); // Width fixed, height grows
+        AutoSize = false;
+        DoubleBuffered = true;
 
-        // Round corners
-        Region = null; // Will set after size is determined
-
-        _titleLabel = new Label
+        _contentPanel = new Panel
         {
-            Text = "Periphery Battery",
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
-            ForeColor = Color.FromArgb(200, 200, 200),
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 8),
-        };
-
-        _table = new TableLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 3,
-            Padding = new Padding(0),
-            Margin = new Padding(0),
-        };
-        _table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // icon/vendor
-        _table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // device name
-        _table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // battery %
-
-        var container = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            WrapContents = false,
-            Padding = new Padding(0),
-            Margin = new Padding(0),
+            Dock = DockStyle.Fill,
+            Padding = new Padding(14, 12, 14, 12),
+            AutoSize = false,
             BackColor = Color.Transparent,
         };
-        container.Controls.Add(_titleLabel);
-        container.Controls.Add(_table);
+        Controls.Add(_contentPanel);
 
-        Controls.Add(container);
-
-        // Close when clicked outside
         Deactivate += (_, _) => Hide();
     }
 
@@ -76,105 +43,166 @@ public class BatteryPopup : Form
             return;
         }
 
-        _table.Controls.Clear();
-        _table.RowStyles.Clear();
-        _table.RowCount = 0;
+        _contentPanel.Controls.Clear();
+
+        var y = 12; // top padding
+
+        // Title
+        var title = new Label
+        {
+            Text = "Periphery Battery",
+            Font = new Font("Segoe UI", 10, FontStyle.Bold),
+            ForeColor = Color.FromArgb(160, 160, 170),
+            Location = new Point(14, y),
+            AutoSize = true,
+        };
+        _contentPanel.Controls.Add(title);
+        y += 26;
+
+        // Separator line
+        var sep = new Panel
+        {
+            BackColor = Color.FromArgb(55, 55, 60),
+            Location = new Point(14, y),
+            Size = new Size(252, 1),
+        };
+        _contentPanel.Controls.Add(sep);
+        y += 10;
 
         if (devices.Count == 0)
         {
-            AddRow("", "No devices found", "", Color.Gray);
-            return;
-        }
-
-        foreach (var device in devices)
-        {
-            var icon = device.DeviceType switch
+            var noDevices = new Label
             {
-                "Mouse" => "\U0001F5B1",      // 🖱
-                "Keyboard" => "\u2328",         // ⌨
-                "Headset" => "\U0001F3A7",     // 🎧
-                _ => "\U0001F50B",              // 🔋
+                Text = "No devices found",
+                Font = new Font("Segoe UI", 9),
+                ForeColor = Color.Gray,
+                Location = new Point(14, y),
+                AutoSize = true,
             };
-
-            var batteryColor = GetBatteryColor(device);
-            var statusText = device.StatusText;
-
-            AddRow(icon, device.DisplayName, statusText, batteryColor);
+            _contentPanel.Controls.Add(noDevices);
+            y += 28;
         }
+        else
+        {
+            foreach (var device in devices)
+            {
+                y = AddDeviceRow(device, y);
+            }
+        }
+
+        y += 4; // bottom padding
+        Height = y;
     }
 
-    private void AddRow(string icon, string name, string status, Color statusColor)
+    private int AddDeviceRow(DeviceInfo device, int y)
     {
-        var row = _table.RowCount;
-        _table.RowCount++;
-        _table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var icon = device.DeviceType switch
+        {
+            "Mouse" => "\U0001F5B1",
+            "Keyboard" => "\u2328\uFE0F",
+            "Headset" => "\U0001F3A7",
+            _ => "\U0001F50B",
+        };
 
+        // Short display name
+        var name = device.DisplayName;
+        if (name.Length > 22) name = name[..22] + "…";
+
+        var batteryColor = GetBatteryColor(device);
+        var statusText = device.StatusText;
+
+        // Row: [icon] [name]              [status]
         var iconLabel = new Label
         {
             Text = icon,
-            Font = new Font("Segoe UI Emoji", 12),
-            AutoSize = true,
-            Margin = new Padding(0, 4, 8, 4),
+            Font = new Font("Segoe UI Emoji", 11),
+            Location = new Point(14, y),
+            Size = new Size(28, 24),
             ForeColor = Color.White,
             BackColor = Color.Transparent,
         };
+        _contentPanel.Controls.Add(iconLabel);
 
-        // Truncate long device names to keep the popup compact
-        var shortName = name.Length > 25 ? name[..25] + "…" : name;
         var nameLabel = new Label
         {
-            Text = shortName,
-            Font = new Font("Segoe UI", 10),
+            Text = name,
+            Font = new Font("Segoe UI", 9.5f),
+            Location = new Point(42, y + 3),
             AutoSize = true,
-            Margin = new Padding(0, 6, 16, 4),
-            ForeColor = Color.FromArgb(220, 220, 220),
+            ForeColor = Color.FromArgb(210, 210, 215),
             BackColor = Color.Transparent,
         };
+        _contentPanel.Controls.Add(nameLabel);
 
         var statusLabel = new Label
         {
-            Text = status,
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
-            AutoSize = true,
-            Margin = new Padding(0, 5, 0, 4),
-            ForeColor = statusColor,
+            Text = statusText,
+            Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+            ForeColor = batteryColor,
             BackColor = Color.Transparent,
             TextAlign = ContentAlignment.MiddleRight,
+            Location = new Point(200, y + 2),
+            Size = new Size(66, 22),
         };
+        _contentPanel.Controls.Add(statusLabel);
 
-        _table.Controls.Add(iconLabel, 0, row);
-        _table.Controls.Add(nameLabel, 1, row);
-        _table.Controls.Add(statusLabel, 2, row);
+        y += 26;
+
+        // Battery bar (only if connected with known percentage)
+        if (device.Connected && device.BatteryPercent.HasValue)
+        {
+            var barBg = new Panel
+            {
+                BackColor = Color.FromArgb(50, 50, 55),
+                Location = new Point(42, y),
+                Size = new Size(224, 4),
+            };
+            _contentPanel.Controls.Add(barBg);
+
+            var barWidth = (int)(224 * device.BatteryPercent.Value / 100.0);
+            if (barWidth > 0)
+            {
+                var barFill = new Panel
+                {
+                    BackColor = batteryColor,
+                    Location = new Point(42, y),
+                    Size = new Size(barWidth, 4),
+                };
+                _contentPanel.Controls.Add(barFill);
+                barFill.BringToFront();
+            }
+
+            y += 12;
+        }
+        else
+        {
+            y += 4;
+        }
+
+        return y;
     }
 
     private static Color GetBatteryColor(DeviceInfo device)
     {
-        if (!device.Connected) return Color.Gray;
+        if (!device.Connected) return Color.FromArgb(100, 100, 105);
         if (device.Error != null) return Color.FromArgb(255, 100, 100);
-        if (device.BatteryPercent == null) return Color.Gray;
+        if (device.BatteryPercent == null) return Color.FromArgb(100, 100, 105);
         if (device.Charging) return Color.FromArgb(100, 200, 255);
         return device.BatteryPercent switch
         {
-            <= 10 => Color.FromArgb(255, 60, 60),   // Red
-            <= 20 => Color.FromArgb(255, 160, 50),   // Orange
-            <= 50 => Color.FromArgb(255, 220, 50),   // Yellow
-            _ => Color.FromArgb(80, 220, 80),         // Green
+            <= 10 => Color.FromArgb(255, 60, 60),
+            <= 20 => Color.FromArgb(255, 160, 50),
+            <= 50 => Color.FromArgb(255, 220, 50),
+            _ => Color.FromArgb(80, 220, 80),
         };
     }
 
-    /// <summary>
-    /// Positions the popup near the system tray (bottom-right of screen).
-    /// </summary>
     public void ShowNearTray()
     {
         var workArea = Screen.PrimaryScreen!.WorkingArea;
 
-        // Force layout so we get accurate size
-        PerformLayout();
-        var popupSize = PreferredSize;
-
-        var x = workArea.Right - popupSize.Width - 8;
-        var y = workArea.Bottom - popupSize.Height - 8;
+        var x = workArea.Right - Width - 12;
+        var y = workArea.Bottom - Height - 12;
 
         Location = new Point(x, y);
         Show();
@@ -185,8 +213,6 @@ public class BatteryPopup : Form
     {
         get
         {
-            // WS_EX_TOOLWINDOW: hides from alt-tab
-            // WS_EX_TOPMOST: always on top
             var cp = base.CreateParams;
             cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
             return cp;
