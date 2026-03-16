@@ -7,7 +7,7 @@ public static class Logger
         "PeripheryBattery", "Logs");
 
     private static readonly string LogFile = Path.Combine(LogDir, "app.log");
-    private static readonly Lock LogLock = new();
+    private static readonly object LogLock = new();
     private const long MaxLogSize = 5 * 1024 * 1024; // 5 MB
 
     static Logger()

@@ -16,7 +16,7 @@ public class LogitechProvider : IDeviceProvider
 
     private const string GHubWsUrl = "ws://localhost:9010";
     private ClientWebSocket? _ws;
-    private readonly Lock _wsLock = new();
+    private readonly object _wsLock = new();
     private readonly Dictionary<string, DeviceInfo> _devices = new();
 
     // Known device type keywords for classification
@@ -88,11 +88,17 @@ public class LogitechProvider : IDeviceProvider
 
                 if (!hasBattery) continue;
 
+                // G HUB provides deviceType directly (HEADSET, KEYBOARD, MOUSE, etc.)
+                var ghubType = dev.TryGetProperty("deviceType", out var dt) ? dt.GetString() ?? "" : "";
+                var deviceType = ghubType.Length > 0
+                    ? char.ToUpper(ghubType[0]) + ghubType[1..].ToLower()  // "HEADSET" -> "Headset"
+                    : ClassifyDevice(displayName);
+
                 var info = new DeviceInfo
                 {
                     Id = deviceId,
                     Vendor = "Logitech",
-                    DeviceType = ClassifyDevice(displayName),
+                    DeviceType = deviceType,
                     DisplayName = displayName,
                     Connected = true,
                     Source = "GHubWebSocket",
@@ -148,6 +154,10 @@ public class LogitechProvider : IDeviceProvider
 
         await _ws.ConnectAsync(new Uri(GHubWsUrl), ct);
         Logger.Log("[Logitech] Connected to G HUB WebSocket");
+
+        // G HUB sends an OPTIONS handshake message on connect — consume it
+        var handshake = await ReceiveFullMessageAsync(ct);
+        Logger.Log($"[Logitech] Handshake received: {handshake?[..Math.Min(handshake.Length, 100)]}");
     }
 
     private async Task EnsureConnectedAsync(CancellationToken ct)
@@ -156,6 +166,33 @@ public class LogitechProvider : IDeviceProvider
         {
             await ConnectAsync(ct);
         }
+    }
+
+    /// <summary>
+    /// Reads a full WebSocket message, handling fragmentation (messages larger than buffer).
+    /// </summary>
+    private async Task<string?> ReceiveFullMessageAsync(CancellationToken ct)
+    {
+        if (_ws is not { State: WebSocketState.Open })
+            return null;
+
+        var buffer = new byte[16384];
+        using var ms = new MemoryStream();
+
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await _ws.ReceiveAsync(buffer, ct);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                Logger.Log("[Logitech] WebSocket closed by server");
+                return null;
+            }
+            ms.Write(buffer, 0, result.Count);
+        }
+        while (!result.EndOfMessage);
+
+        return Encoding.UTF8.GetString(ms.ToArray());
     }
 
     private async Task<JsonDocument?> SendAndReceiveAsync(object request, CancellationToken ct)
@@ -170,16 +207,9 @@ public class LogitechProvider : IDeviceProvider
         var bytes = Encoding.UTF8.GetBytes(json);
         await _ws!.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
 
-        var buffer = new byte[8192];
-        var result = await _ws.ReceiveAsync(buffer, ct);
+        var responseJson = await ReceiveFullMessageAsync(ct);
+        if (responseJson == null) return null;
 
-        if (result.MessageType == WebSocketMessageType.Close)
-        {
-            Logger.Log("[Logitech] WebSocket closed by server");
-            return null;
-        }
-
-        var responseJson = Encoding.UTF8.GetString(buffer, 0, result.Count);
         return JsonDocument.Parse(responseJson);
     }
 
