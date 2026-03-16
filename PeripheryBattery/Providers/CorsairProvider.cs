@@ -220,7 +220,6 @@ public class CorsairProvider : IDeviceProvider
                 Logger.Log($"[Corsair] Found {count} device(s) total");
                 for (int j = 0; j < count; j++)
                     Logger.Log($"[Corsair]   #{j}: model=\"{devices[j].model}\" type=0x{devices[j].type:X} id=\"{devices[j].id?[..Math.Min(devices[j].id?.Length ?? 0, 30)]}\"");
-                _loggedFirstPoll = true;
             }
 
             var results = new List<DeviceInfo>();
@@ -252,39 +251,45 @@ public class CorsairProvider : IDeviceProvider
                     System.Text.Encoding.ASCII.GetBytes(dev.id ?? "", deviceIdBytes);
                     var readErr = CorsairReadDeviceProperty(deviceIdBytes, CDPI_BatteryLevel, 0, out prop);
 
-                    if (readErr == CE_Success && prop.type == CT_Int32)
+                    if (!_loggedFirstPoll)
+                        Logger.Log($"[Corsair] ReadDeviceProperty({dev.model}, BatteryLevel): err={readErr}, type={prop.type}, rawValue=0x{prop.value:X16}");
+
+                    if (readErr == CE_Success)
                     {
-                        var battery = (int)(prop.value & 0xFFFFFFFF);
+                        int battery;
+                        if (prop.type == CT_Int32)
+                        {
+                            battery = (int)(prop.value & 0xFFFFFFFF);
+                        }
+                        else
+                        {
+                            // Try interpreting raw value anyway
+                            battery = (int)(prop.value & 0xFFFFFFFF);
+                            Logger.Log($"[Corsair] {dev.model}: unexpected property type {prop.type}, trying raw int interpretation: {battery}");
+                        }
+
                         info.BatteryPercent = Math.Clamp(battery, 0, 100);
+                        Logger.Log($"[Corsair] {dev.model}: battery={info.BatteryPercent}%");
                         CorsairFreeProperty(ref prop);
                     }
-                    else if (readErr == CE_Success)
-                    {
-                        // Battery property exists but unexpected type
-                        Logger.Log($"[Corsair] {dev.model}: battery property type={prop.type} (expected {CT_Int32})");
-                        CorsairFreeProperty(ref prop);
-                    }
-                    else if (readErr == CE_Success)
-                    {
-                        CorsairFreeProperty(ref prop);
-                        // Property exists but not int32 — unexpected
-                    }
-                    // If readErr != CE_Success, device doesn't support battery (wired device)
-                    // — skip it, don't add to results
                     else
                     {
-                        continue; // No battery = not a wireless device we care about
+                        // Error reading battery — device might be wired or battery not supported
+                        // Still add it but without battery info so user sees it as connected
+                        Logger.Log($"[Corsair] {dev.model}: battery read error {readErr} (device may not have battery)");
+                        continue;
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log($"[Corsair] Battery read failed for {dev.model}: {ex.Message}");
+                    Logger.Log($"[Corsair] Battery read exception for {dev.model}: {ex.Message}");
                     continue;
                 }
 
                 results.Add(info);
             }
 
+            _loggedFirstPoll = true;
             _lastGoodDevices = results;
             return Task.FromResult(results);
         }

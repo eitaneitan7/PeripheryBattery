@@ -132,6 +132,8 @@ public class RazerProvider : IDeviceProvider
         return ReturnError("No battery data in Synapse 3 log");
     }
 
+    private bool _loggedFirstRazerPoll;
+
     private List<DeviceInfo> ParseSynapse4Log()
     {
         var content = ReadLogFileSafe(Synapse4LogPath);
@@ -140,6 +142,14 @@ public class RazerProvider : IDeviceProvider
         var matches = S4BatteryRegex.Matches(content);
         if (matches.Count == 0)
             return ReturnError("No battery data in Synapse 4 log");
+
+        // Log what we're matching on first poll
+        if (!_loggedFirstRazerPoll)
+        {
+            Logger.Log($"[Razer] Synapse 4: found {matches.Count} connectingDeviceData entries");
+            var lastLine = matches[^1].Value;
+            Logger.Log($"[Razer] Last entry (first 500 chars): {lastLine[..Math.Min(lastLine.Length, 500)]}");
+        }
 
         var lastMatch = matches[^1];
         var jsonStr = lastMatch.Groups["json"].Value.Trim();
@@ -169,14 +179,21 @@ public class RazerProvider : IDeviceProvider
 
                 int? level = null;
                 var charging = false;
+                string? chargingRaw = null;
                 if (dev.TryGetProperty("powerStatus", out var ps))
                 {
                     if (ps.TryGetProperty("level", out var lv))
                         level = lv.GetInt32();
                     if (ps.TryGetProperty("chargingStatus", out var cs))
-                        charging = cs.GetString()?.Contains("Charging", StringComparison.OrdinalIgnoreCase) == true
-                                   && cs.GetString() != "NoCharge_BatteryFull";
+                    {
+                        chargingRaw = cs.GetString();
+                        charging = chargingRaw?.Contains("Charging", StringComparison.OrdinalIgnoreCase) == true
+                                   && chargingRaw != "NoCharge_BatteryFull";
+                    }
                 }
+
+                if (!_loggedFirstRazerPoll)
+                    Logger.Log($"[Razer] Parsed device: name=\"{name}\" level={level} chargingStatus=\"{chargingRaw}\"");
 
                 devices.Add(new DeviceInfo
                 {
@@ -191,6 +208,8 @@ public class RazerProvider : IDeviceProvider
                     LastUpdated = DateTime.Now,
                 });
             }
+
+            _loggedFirstRazerPoll = true;
 
             if (devices.Count > 0)
             {
