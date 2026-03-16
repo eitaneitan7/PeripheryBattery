@@ -96,22 +96,39 @@ public class RazerProvider : IDeviceProvider
     /// Scans all products_*_mw *.log files for GET_BATTERY_STATE entries.
     /// These have real-time battery data updated every ~2.5 minutes by Synapse.
     /// </summary>
+    // Regex to extract product ID from filename: products_<pid>_mw {<guid>}.log
+    private static readonly Regex ProductIdRegex = new(
+        @"products_(\d+)_mw\s", RegexOptions.Compiled);
+
     private List<DeviceInfo> ParseSynapse4ProductLogs()
     {
         var results = new List<DeviceInfo>();
 
-        string[] productLogs;
+        string[] allLogs;
         try
         {
-            productLogs = Directory.GetFiles(Synapse4LogDir, "products_*_mw *.log");
+            allLogs = Directory.GetFiles(Synapse4LogDir, "products_*_mw *.log");
         }
         catch
         {
             return results;
         }
 
-        if (!_loggedFirstPoll && productLogs.Length > 0)
-            Logger.Log($"[Razer] Found {productLogs.Length} product log file(s)");
+        // Synapse rotates logs: {guid}.log, {guid}1.log, {guid}2.log, etc.
+        // Group by product ID (e.g. "182") and only take the most recently modified file per product.
+        var productLogs = allLogs
+            .Select(f => new { Path = f, Info = new FileInfo(f) })
+            .Where(f => f.Info.Exists)
+            .GroupBy(f =>
+            {
+                var m = ProductIdRegex.Match(Path.GetFileName(f.Path));
+                return m.Success ? m.Groups[1].Value : Path.GetFileName(f.Path);
+            })
+            .Select(g => g.OrderByDescending(f => f.Info.LastWriteTime).First().Path)
+            .ToList();
+
+        if (!_loggedFirstPoll && productLogs.Count > 0)
+            Logger.Log($"[Razer] Found {allLogs.Length} product log file(s), using {productLogs.Count} (most recent per product)");
 
         foreach (var logPath in productLogs)
         {
