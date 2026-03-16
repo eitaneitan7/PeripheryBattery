@@ -15,6 +15,7 @@ public class RazerProvider : IDeviceProvider
     public string Vendor => "Razer";
 
     private readonly List<DeviceInfo> _lastKnown = new();
+    private bool _loggedNotFound;
 
     private static readonly string Synapse3LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -32,9 +33,15 @@ public class RazerProvider : IDeviceProvider
         @"level\s+(?<level>\d+)\s+state\s+(?<isCharging>\d+)",
         RegexOptions.Compiled);
 
+    // Synapse 4: full device data dump (has battery in JSON)
     private static readonly Regex S4BatteryRegex = new(
         @"^\[(?<timestamp>.+?)\].*connectingDeviceData:\s*(?<json>.+)$",
         RegexOptions.Multiline | RegexOptions.Compiled);
+
+    // Synapse 4: individual battery level update lines
+    private static readonly Regex S4BatteryUpdateRegex = new(
+        @"(?:battery|power).*?level.*?(?<level>\d{1,3})",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
     public Task StopAsync() => Task.CompletedTask;
@@ -49,20 +56,12 @@ public class RazerProvider : IDeviceProvider
             if (File.Exists(Synapse3LogPath))
                 return Task.FromResult(ParseSynapse3Log());
 
-            return Task.FromResult(new List<DeviceInfo>
+            if (!_loggedNotFound)
             {
-                new()
-                {
-                    Id = "razer-unknown",
-                    Vendor = "Razer",
-                    DeviceType = "Mouse",
-                    DisplayName = "Razer Mouse",
-                    Connected = false,
-                    Source = "SynapseLog",
-                    LastUpdated = DateTime.Now,
-                    Error = "Synapse not found"
-                }
-            });
+                Logger.Log("[Razer] No Synapse log files found, provider disabled");
+                _loggedNotFound = true;
+            }
+            return Task.FromResult(new List<DeviceInfo>());
         }
         catch (Exception ex)
         {
@@ -243,22 +242,16 @@ public class RazerProvider : IDeviceProvider
         return "Unknown";
     }
 
-    private static List<DeviceInfo> ReturnError(string error)
+    private string? _lastError;
+
+    private List<DeviceInfo> ReturnError(string error)
     {
-        Logger.Log($"[Razer] {error}");
-        return new List<DeviceInfo>
+        // Only log if the error message changed
+        if (error != _lastError)
         {
-            new()
-            {
-                Id = "razer-unavailable",
-                Vendor = "Razer",
-                DeviceType = "Mouse",
-                DisplayName = "Razer Device",
-                Connected = false,
-                Source = "SynapseLog",
-                LastUpdated = DateTime.Now,
-                Error = error
-            }
-        };
+            Logger.Log($"[Razer] {error}");
+            _lastError = error;
+        }
+        return new List<DeviceInfo>();
     }
 }

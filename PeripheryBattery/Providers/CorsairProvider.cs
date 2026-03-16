@@ -15,6 +15,7 @@ public class CorsairProvider : IDeviceProvider
     private bool _connected;
     private bool _sdkAvailable;
     private List<DeviceInfo> _lastGoodDevices = new();
+    private bool _loggedFirstPoll;
 
     #region P/Invoke Declarations
 
@@ -214,6 +215,14 @@ public class CorsairProvider : IDeviceProvider
                 return Task.FromResult(_lastGoodDevices.ToList());
             }
 
+            if (!_loggedFirstPoll)
+            {
+                Logger.Log($"[Corsair] Found {count} device(s) total");
+                for (int j = 0; j < count; j++)
+                    Logger.Log($"[Corsair]   #{j}: model=\"{devices[j].model}\" type=0x{devices[j].type:X} id=\"{devices[j].id?[..Math.Min(devices[j].id?.Length ?? 0, 30)]}\"");
+                _loggedFirstPoll = true;
+            }
+
             var results = new List<DeviceInfo>();
 
             for (int i = 0; i < count; i++)
@@ -247,6 +256,12 @@ public class CorsairProvider : IDeviceProvider
                     {
                         var battery = (int)(prop.value & 0xFFFFFFFF);
                         info.BatteryPercent = Math.Clamp(battery, 0, 100);
+                        CorsairFreeProperty(ref prop);
+                    }
+                    else if (readErr == CE_Success)
+                    {
+                        // Battery property exists but unexpected type
+                        Logger.Log($"[Corsair] {dev.model}: battery property type={prop.type} (expected {CT_Int32})");
                         CorsairFreeProperty(ref prop);
                     }
                     else if (readErr == CE_Success)

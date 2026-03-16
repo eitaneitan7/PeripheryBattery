@@ -18,6 +18,8 @@ public class LogitechProvider : IDeviceProvider
     private const string GHubWsUrl = "ws://localhost:9010";
     private ClientWebSocket? _ws;
     private List<DeviceInfo> _lastGoodDevices = new();
+    private int _consecutiveFailures;
+    private bool _loggedUnavailable;
 
     private static readonly Dictionary<string, string> DeviceTypeKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -37,9 +39,20 @@ public class LogitechProvider : IDeviceProvider
 
     public async Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {
+        // After 3 consecutive failures, assume G HUB isn't installed — stop trying
+        if (_consecutiveFailures >= 3)
+        {
+            if (!_loggedUnavailable)
+            {
+                Logger.Log("[Logitech] G HUB not available, provider disabled (will not retry)");
+                _loggedUnavailable = true;
+            }
+            return new List<DeviceInfo>();
+        }
+
         try
         {
-            // Fresh connection each poll — simple, no stale state, no interleaved messages
+            // Fresh connection each poll
             await CloseWebSocket();
             await ConnectAsync(ct);
 
@@ -116,11 +129,15 @@ public class LogitechProvider : IDeviceProvider
             }
 
             _lastGoodDevices = results;
+            _consecutiveFailures = 0;
+            _loggedUnavailable = false;
             return results;
         }
         catch (Exception ex)
         {
-            Logger.Log($"[Logitech] GetDevices failed: {ex.Message}");
+            _consecutiveFailures++;
+            if (_consecutiveFailures <= 3)
+                Logger.Log($"[Logitech] GetDevices failed ({_consecutiveFailures}/3): {ex.Message}");
             return _lastGoodDevices.ToList();
         }
     }
