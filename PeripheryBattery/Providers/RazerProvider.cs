@@ -8,59 +8,105 @@ namespace PeripheryBattery.Providers;
 /// <summary>
 /// Reads battery data from Razer Synapse log files.
 /// Supports both Synapse 3 and Synapse 4 log formats.
+/// Uses FileSystemWatcher for near-instant detection of log changes.
 /// </summary>
 public class RazerProvider : IDeviceProvider
 {
     public string Vendor => "Razer";
+    public event Action? Changed;
 
     private readonly List<DeviceInfo> _lastKnown = new();
+    private FileSystemWatcher? _watcher;
 
-    // Synapse 3: %LOCALAPPDATA%\Razer\Synapse3\Log\Razer Synapse 3.log
     private static readonly string Synapse3LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Razer", "Synapse3", "Log", "Razer Synapse 3.log");
 
-    // Synapse 4: %LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2.log
     private static readonly string Synapse4LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Razer", "RazerAppEngine", "User Data", "Logs", "systray_systrayv2.log");
 
-    // Synapse 3 regex: multiline battery event
     private static readonly Regex S3BatteryRegex = new(
         @"^(?<dateTime>.+?)\s+INFO.+?_OnBatteryLevelChanged[\s\S]*?Name:\s*(?<name>.*?)[\r\n][\s\S]*?Handle:\s*(?<handle>\d+)[\s\S]*?level\s+(?<level>\d+)\s+state\s+(?<isCharging>\d+)",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
-    // Synapse 3 simple fallback: just find the last "level X state Y"
     private static readonly Regex S3SimpleBatteryRegex = new(
         @"level\s+(?<level>\d+)\s+state\s+(?<isCharging>\d+)",
         RegexOptions.Compiled);
 
-    // Synapse 4 regex: JSON payload with device data
     private static readonly Regex S4BatteryRegex = new(
         @"^\[(?<timestamp>.+?)\].*connectingDeviceData:\s*(?<json>.+)$",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
-    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
-    public Task StopAsync() => Task.CompletedTask;
+    public Task StartAsync(CancellationToken ct)
+    {
+        SetupFileWatcher();
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync()
+    {
+        _watcher?.Dispose();
+        _watcher = null;
+        return Task.CompletedTask;
+    }
+
+    private void SetupFileWatcher()
+    {
+        // Watch whichever Synapse log directory exists
+        string? watchPath = null;
+        string? watchFile = null;
+
+        if (File.Exists(Synapse4LogPath))
+        {
+            watchPath = Path.GetDirectoryName(Synapse4LogPath);
+            watchFile = Path.GetFileName(Synapse4LogPath);
+        }
+        else if (File.Exists(Synapse3LogPath))
+        {
+            watchPath = Path.GetDirectoryName(Synapse3LogPath);
+            watchFile = Path.GetFileName(Synapse3LogPath);
+        }
+
+        if (watchPath == null || watchFile == null) return;
+
+        try
+        {
+            _watcher = new FileSystemWatcher(watchPath, watchFile)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
+                EnableRaisingEvents = true,
+            };
+
+            // Debounce: Synapse writes frequently, we don't need to react to every byte
+            DateTime lastFired = DateTime.MinValue;
+            _watcher.Changed += (_, _) =>
+            {
+                var now = DateTime.Now;
+                if ((now - lastFired).TotalSeconds < 3) return;
+                lastFired = now;
+                Logger.Log("[Razer] Log file changed, triggering update");
+                Changed?.Invoke();
+            };
+
+            Logger.Log($"[Razer] Watching {Path.Combine(watchPath, watchFile)} for changes");
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"[Razer] FileSystemWatcher setup failed: {ex.Message}");
+        }
+    }
 
     public Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {
         try
         {
-            // Try Synapse 4 first, then fall back to Synapse 3
             if (File.Exists(Synapse4LogPath))
-            {
-                Logger.Log($"[Razer] Using Synapse 4 log: {Synapse4LogPath}");
                 return Task.FromResult(ParseSynapse4Log());
-            }
 
             if (File.Exists(Synapse3LogPath))
-            {
-                Logger.Log($"[Razer] Using Synapse 3 log: {Synapse3LogPath}");
                 return Task.FromResult(ParseSynapse3Log());
-            }
 
-            Logger.Log("[Razer] No Synapse log files found. Synapse may not be installed or running.");
             return Task.FromResult(new List<DeviceInfo>
             {
                 new()
@@ -79,20 +125,7 @@ public class RazerProvider : IDeviceProvider
         catch (Exception ex)
         {
             Logger.Log($"[Razer] Error reading battery data: {ex.Message}");
-            return Task.FromResult(new List<DeviceInfo>
-            {
-                new()
-                {
-                    Id = "razer-error",
-                    Vendor = "Razer",
-                    DeviceType = "Mouse",
-                    DisplayName = "Razer Mouse",
-                    Connected = false,
-                    Source = "SynapseLog",
-                    LastUpdated = DateTime.Now,
-                    Error = ex.Message
-                }
-            });
+            return Task.FromResult(ReturnError(ex.Message));
         }
     }
 
@@ -101,11 +134,9 @@ public class RazerProvider : IDeviceProvider
         var content = ReadLogFileSafe(Synapse3LogPath);
         if (content == null) return ReturnError("Cannot read Synapse 3 log");
 
-        // Try detailed regex first (gets device name)
         var matches = S3BatteryRegex.Matches(content);
         if (matches.Count > 0)
         {
-            // Group by device name, take the last (most recent) entry for each
             var deviceMap = new Dictionary<string, DeviceInfo>(StringComparer.OrdinalIgnoreCase);
 
             foreach (Match m in matches)
@@ -133,11 +164,10 @@ public class RazerProvider : IDeviceProvider
             return _lastKnown.ToList();
         }
 
-        // Fallback: simple regex, can't distinguish devices
         var simpleMatches = S3SimpleBatteryRegex.Matches(content);
         if (simpleMatches.Count > 0)
         {
-            var last = simpleMatches[^1]; // most recent
+            var last = simpleMatches[^1];
             var level = int.Parse(last.Groups["level"].Value);
             var charging = last.Groups["isCharging"].Value != "0";
 
@@ -170,7 +200,6 @@ public class RazerProvider : IDeviceProvider
         if (matches.Count == 0)
             return ReturnError("No battery data in Synapse 4 log");
 
-        // Take the last match (most recent)
         var lastMatch = matches[^1];
         var jsonStr = lastMatch.Groups["json"].Value.Trim();
 
@@ -180,7 +209,6 @@ public class RazerProvider : IDeviceProvider
             using var doc = JsonDocument.Parse(jsonStr);
             var root = doc.RootElement;
 
-            // The JSON may be an array or object containing device entries
             var elements = root.ValueKind == JsonValueKind.Array
                 ? root.EnumerateArray()
                 : new[] { root }.AsEnumerable();
@@ -239,10 +267,6 @@ public class RazerProvider : IDeviceProvider
         }
     }
 
-    /// <summary>
-    /// Reads log file with shared read access (Synapse may still be writing to it).
-    /// Reads last 512KB to avoid loading huge log files.
-    /// </summary>
     private static string? ReadLogFileSafe(string path)
     {
         try

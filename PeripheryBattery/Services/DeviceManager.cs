@@ -6,8 +6,9 @@ using PeripheryBattery.Utils;
 namespace PeripheryBattery.Services;
 
 /// <summary>
-/// Orchestrates all device providers, runs the polling loop,
-/// and exposes a unified list of device battery states.
+/// Orchestrates all device providers. Listens for real-time change events
+/// from providers (WebSocket push, file watcher) and also runs a fallback
+/// poll timer. Exposes a unified device list via the DevicesUpdated event.
 /// </summary>
 public class DeviceManager : IDisposable
 {
@@ -15,6 +16,10 @@ public class DeviceManager : IDisposable
     private readonly AppConfig _config;
     private System.Threading.Timer? _pollTimer;
     private CancellationTokenSource? _cts;
+    private DateTime _lastPoll = DateTime.MinValue;
+
+    // Minimum time between polls to avoid hammering on rapid change events
+    private static readonly TimeSpan MinPollInterval = TimeSpan.FromSeconds(3);
 
     public List<DeviceInfo> Devices { get; private set; } = new();
     public event Action? DevicesUpdated;
@@ -24,6 +29,16 @@ public class DeviceManager : IDisposable
         _config = config;
         _providers.Add(new LogitechProvider());
         _providers.Add(new RazerProvider());
+
+        // Listen to real-time change events from each provider
+        foreach (var provider in _providers)
+        {
+            provider.Changed += () =>
+            {
+                Logger.Log($"[DeviceManager] {provider.Vendor} reported a change");
+                _ = PollThrottledAsync();
+            };
+        }
     }
 
     public async Task StartAsync()
@@ -46,7 +61,7 @@ public class DeviceManager : IDisposable
         // Initial poll
         await PollAsync();
 
-        // Schedule recurring polls
+        // Fallback poll timer (catches anything the real-time events miss)
         _pollTimer = new System.Threading.Timer(
             async _ => await PollAsync(),
             null,
@@ -54,8 +69,19 @@ public class DeviceManager : IDisposable
             TimeSpan.FromSeconds(_config.PollIntervalSeconds));
     }
 
+    /// <summary>
+    /// Throttled poll — skips if we polled too recently (prevents hammering on
+    /// rapid file change events or WebSocket push bursts).
+    /// </summary>
+    private async Task PollThrottledAsync()
+    {
+        if (DateTime.Now - _lastPoll < MinPollInterval) return;
+        await PollAsync();
+    }
+
     public async Task PollAsync()
     {
+        _lastPoll = DateTime.Now;
         var allDevices = new List<DeviceInfo>();
 
         foreach (var provider in _providers)
@@ -63,7 +89,6 @@ public class DeviceManager : IDisposable
             try
             {
                 var devices = await provider.GetDevicesAsync(_cts?.Token ?? CancellationToken.None);
-                // Apply friendly name overrides (substring matching)
                 foreach (var d in devices)
                 {
                     d.DisplayName = _config.ApplyNameOverride(d.DisplayName);
@@ -96,7 +121,7 @@ public class DeviceManager : IDisposable
         foreach (var provider in _providers)
         {
             try { provider.StopAsync().Wait(TimeSpan.FromSeconds(2)); }
-            catch { /* best effort */ }
+            catch { }
         }
         _cts?.Dispose();
     }

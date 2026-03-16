@@ -188,14 +188,7 @@ public class TrayApp : ApplicationContext
     {
         var menu = new ContextMenuStrip();
 
-        menu.Items.Add("Refresh Now", null, async (_, _) =>
-        {
-            await _deviceManager.PollAsync();
-        });
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        menu.Items.Add("Open Log File", null, (_, _) =>
+        menu.Items.Add("Open Log", null, (_, _) =>
         {
             try { System.Diagnostics.Process.Start("notepad.exe", Logger.LogFilePath); }
             catch { }
