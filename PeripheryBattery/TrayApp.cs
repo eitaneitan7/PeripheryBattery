@@ -174,13 +174,13 @@ public class TrayApp : ApplicationContext
 
     private static Color GetBatteryColor(DeviceInfo device)
     {
-        if (device.Charging) return Color.FromArgb(100, 200, 255); // Cyan
+        if (device.Charging) return Color.FromArgb(130, 190, 220); // Soft blue
         return device.BatteryPercent switch
         {
-            <= 10 => Color.FromArgb(255, 60, 60),    // Red
-            <= 20 => Color.FromArgb(255, 160, 50),    // Orange
-            <= 50 => Color.FromArgb(255, 220, 50),    // Yellow
-            _ => Color.FromArgb(80, 220, 80),          // Green
+            <= 10 => Color.FromArgb(210, 90, 90),     // Muted red
+            <= 20 => Color.FromArgb(210, 150, 80),     // Warm amber
+            <= 50 => Color.FromArgb(200, 190, 110),    // Soft gold
+            _ => Color.FromArgb(110, 190, 130),         // Soft green
         };
     }
 
@@ -221,40 +221,65 @@ public class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Creates a 16x16 icon with battery percentage text, color-coded by level.
+    /// Creates a high-quality tray icon by rendering at 64x64 with anti-aliasing,
+    /// then scaling down. This produces much crisper text than rendering at 16x16.
     /// </summary>
     private static Icon CreateTextIcon(string text, Color color)
     {
-        var bitmap = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bitmap);
+        const int renderSize = 128;
+        const int iconSize = 64;
 
-        g.Clear(Color.Transparent);
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
-
-        // Pick font size based on text length
-        var fontSize = text.Length switch
+        using var renderBitmap = new Bitmap(renderSize, renderSize);
+        using (var g = Graphics.FromImage(renderBitmap))
         {
-            1 => 11f,
-            2 => 9f,
-            3 => 7f,
-            _ => 6f,
-        };
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-        using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
-        var size = g.MeasureString(text, font);
-        var x = (16 - size.Width) / 2;
-        var y = (16 - size.Height) / 2;
+            var fontSize = text.Length switch
+            {
+                1 => 96f,
+                2 => 80f,
+                3 => 58f,
+                _ => 48f,
+            };
 
-        // Draw shadow for readability on any background
-        using var shadowBrush = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
-        g.DrawString(text, font, shadowBrush, x + 1, y + 1);
+            using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
 
-        // Draw text in battery color
-        using var textBrush = new SolidBrush(color);
-        g.DrawString(text, font, textBrush, x, y);
+            // Measure with StringFormat for precise centering
+            var sf = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+            };
+            var rect = new RectangleF(0, 0, renderSize, renderSize);
 
-        var handle = bitmap.GetHicon();
-        return Icon.FromHandle(handle);
+            // Subtle dark glow behind text for readability on light/dark taskbars
+            using var shadowBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0));
+            for (int dx = -2; dx <= 2; dx++)
+                for (int dy = -2; dy <= 2; dy++)
+                    if (dx != 0 || dy != 0)
+                    {
+                        var shadowRect = rect;
+                        shadowRect.Offset(dx * 2, dy * 2);
+                        g.DrawString(text, font, shadowBrush, shadowRect, sf);
+                    }
+
+            // Draw main text
+            using var textBrush = new SolidBrush(color);
+            g.DrawString(text, font, textBrush, rect, sf);
+        }
+
+        // Scale down with high quality interpolation
+        using var iconBitmap = new Bitmap(iconSize, iconSize);
+        using (var g = Graphics.FromImage(iconBitmap))
+        {
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            g.DrawImage(renderBitmap, 0, 0, iconSize, iconSize);
+        }
+
+        return Icon.FromHandle(iconBitmap.GetHicon());
     }
 
     /// <summary>
