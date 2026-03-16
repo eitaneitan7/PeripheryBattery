@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Resources\battery.ico</ApplicationIcon>
+    <AssemblyName>PeripheryBattery</AssemblyName>
+    <RootNamespace>PeripheryBattery</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\battery.ico" />
+  </ItemGroup>
+
+</Project>
