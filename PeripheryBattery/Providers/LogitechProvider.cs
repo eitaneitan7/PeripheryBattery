@@ -18,12 +18,13 @@ public class LogitechProvider : IDeviceProvider
 
     private const string GHubWsUrl = "ws://localhost:9010";
     private ClientWebSocket? _ws;
-    private readonly object _wsLock = new();
-    private readonly Dictionary<string, DeviceInfo> _devices = new();
+    private readonly SemaphoreSlim _pollLock = new(1, 1);
+    private List<DeviceInfo> _lastGoodDevices = new();
     private CancellationTokenSource? _listenerCts;
     private Task? _listenerTask;
     private bool _subscribedBattery;
     private bool _subscribedDevices;
+    private volatile bool _polling; // prevent Changed from re-entering
 
     private static readonly Dictionary<string, string> DeviceTypeKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -60,11 +61,16 @@ public class LogitechProvider : IDeviceProvider
 
     public async Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {
+        // Prevent concurrent polls (Razer file watcher can trigger mid-Logitech-poll)
+        if (!await _pollLock.WaitAsync(0, ct))
+        {
+            return _lastGoodDevices.ToList();
+        }
+
+        _polling = true;
         try
         {
             await EnsureConnectedAsync(ct);
-
-            // Subscribe to push updates if not already done
             await EnsureSubscribedAsync(ct);
 
             var deviceList = await SendAndReceiveAsync(new
@@ -75,11 +81,17 @@ public class LogitechProvider : IDeviceProvider
             }, ct);
 
             if (deviceList == null)
-                return GetCachedWithError("No response from G HUB");
+            {
+                Logger.Log("[Logitech] No response from G HUB");
+                return _lastGoodDevices.ToList();
+            }
 
             if (!deviceList.RootElement.TryGetProperty("payload", out var payload) ||
                 !payload.TryGetProperty("deviceInfos", out var deviceInfos))
-                return GetCachedWithError("No devices found");
+            {
+                Logger.Log("[Logitech] No deviceInfos in response");
+                return _lastGoodDevices.ToList();
+            }
 
             var results = new List<DeviceInfo>();
 
@@ -136,17 +148,23 @@ public class LogitechProvider : IDeviceProvider
                 }
 
                 results.Add(info);
-                _devices[deviceId] = info;
             }
 
+            // Only update cache on success
+            _lastGoodDevices = results;
             return results;
         }
         catch (Exception ex)
         {
             Logger.Log($"[Logitech] GetDevices failed: {ex.Message}");
-            // Force reconnect on next attempt
             await CloseWebSocket();
-            return GetCachedWithError(ex.Message);
+            // Return last good state instead of marking everything disconnected
+            return _lastGoodDevices.ToList();
+        }
+        finally
+        {
+            _polling = false;
+            _pollLock.Release();
         }
     }
 
@@ -279,14 +297,15 @@ public class LogitechProvider : IDeviceProvider
             var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
 
-            // Check if this is a subscription push (verb == "CYCLIC" or has no matching msgId)
+            // Check if this is a subscription push event — skip it and keep reading
             var verb = root.TryGetProperty("verb", out var v) ? v.GetString() : "";
             if (verb == "CYCLIC" || verb == "CYCLED")
             {
-                // This is a push notification — trigger a refresh and keep reading
-                Logger.Log($"[Logitech] Push event received: {verb}");
-                Changed?.Invoke();
+                Logger.Log($"[Logitech] Push event received (skipping): {verb}");
                 doc.Dispose();
+                // Only fire Changed if we're not already mid-poll (avoid reentrant loop)
+                if (!_polling)
+                    Changed?.Invoke();
                 continue;
             }
 
@@ -303,15 +322,7 @@ public class LogitechProvider : IDeviceProvider
         await _ws!.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
     }
 
-    private List<DeviceInfo> GetCachedWithError(string error)
-    {
-        foreach (var d in _devices.Values)
-        {
-            d.Error = error;
-            d.Connected = false;
-        }
-        return _devices.Values.ToList();
-    }
+
 
     private static string ClassifyDevice(string name)
     {
