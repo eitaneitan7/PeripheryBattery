@@ -10,6 +10,8 @@ public static class Logger
     private static readonly object LogLock = new();
     private const long MaxLogSize = 5 * 1024 * 1024; // 5 MB
 
+    public static bool Enabled { get; set; } = true;
+
     static Logger()
     {
         Directory.CreateDirectory(LogDir);
@@ -17,6 +19,8 @@ public static class Logger
 
     public static void Log(string message)
     {
+        if (!Enabled) return;
+
         var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}";
 
         lock (LogLock)

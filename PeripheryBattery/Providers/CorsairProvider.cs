@@ -15,7 +15,6 @@ public class CorsairProvider : IDeviceProvider
     private bool _connected;
     private bool _sdkAvailable;
     private List<DeviceInfo> _lastGoodDevices = new();
-    private bool _loggedFirstPoll;
 
     #region P/Invoke Declarations
 
@@ -123,8 +122,11 @@ public class CorsairProvider : IDeviceProvider
 
     #endregion
 
+    private int _pollCount;
+
     public Task StartAsync(CancellationToken ct)
     {
+        Logger.Log("[Corsair] Provider starting, attempting to load iCUE SDK...");
         try
         {
             // Test if the DLL is available
@@ -136,6 +138,7 @@ public class CorsairProvider : IDeviceProvider
                 Logger.Log("[Corsair] iCUE SDK connected, waiting for session...");
                 // Give iCUE a moment to establish the session
                 Thread.Sleep(500);
+                Logger.Log($"[Corsair] After 500ms wait: connected={_connected}");
             }
             else
             {
@@ -143,17 +146,18 @@ public class CorsairProvider : IDeviceProvider
                 _sdkAvailable = true; // DLL loaded, just not connected yet
             }
         }
-        catch (DllNotFoundException)
+        catch (DllNotFoundException ex)
         {
-            Logger.Log("[Corsair] iCUESDK.x64_2019.dll not found — Corsair support disabled");
+            Logger.Log($"[Corsair] iCUESDK.x64_2019.dll not found — Corsair support disabled. Details: {ex.Message}");
             _sdkAvailable = false;
         }
         catch (Exception ex)
         {
-            Logger.Log($"[Corsair] SDK init failed: {ex.Message}");
+            Logger.Log($"[Corsair] SDK init failed: {ex.GetType().Name}: {ex.Message}");
             _sdkAvailable = false;
         }
 
+        Logger.Log($"[Corsair] Provider started: sdkAvailable={_sdkAvailable}, connected={_connected}");
         return Task.CompletedTask;
     }
 
@@ -169,37 +173,65 @@ public class CorsairProvider : IDeviceProvider
 
     private bool _loggedTimeout;
 
+    // Map of known session state codes for logging
+    private static string SessionStateName(int state) => state switch
+    {
+        0 => "Disconnected",
+        1 => "Connected_NoExclusiveAccess",
+        2 => "Connected_ReadOnly",
+        3 => "Timeout",
+        4 => "ConnectionRefused",
+        5 => "ConnectionLost",
+        6 => "Connected",
+        _ => $"Unknown({state})"
+    };
+
+    private int _sessionCallbackCount;
+
     private void OnSessionStateChanged(IntPtr context, ref CorsairSessionStateChanged eventData)
     {
         var wasConnected = _connected;
         _connected = eventData.state == CSS_Connected;
+        _sessionCallbackCount++;
 
-        // Only log meaningful transitions, not the Connecting/Timeout cycle
+        // Log meaningful transitions always; log repeat states only for first few callbacks
         if (_connected && !wasConnected)
         {
             _loggedTimeout = false;
-            Logger.Log("[Corsair] Connected to iCUE");
+            Logger.Log($"[Corsair] Session state: {SessionStateName(eventData.state)} — Connected to iCUE, will enumerate devices on next poll");
         }
         else if (!_connected && wasConnected)
         {
-            Logger.Log("[Corsair] Disconnected from iCUE");
+            Logger.Log($"[Corsair] Session state: {SessionStateName(eventData.state)} — Disconnected from iCUE, will return last known devices");
         }
         else if (eventData.state == 3 && !_loggedTimeout) // CSS_Timeout, first time
         {
             _loggedTimeout = true;
-            Logger.Log("[Corsair] iCUE not responding (will keep retrying silently)");
+            Logger.Log("[Corsair] iCUE not responding (will keep retrying silently). Is iCUE running?");
+        }
+        else if (_sessionCallbackCount <= 5)
+        {
+            // Log first few state transitions for diagnostics
+            Logger.Log($"[Corsair] Session state: {SessionStateName(eventData.state)} (callback #{_sessionCallbackCount})");
         }
     }
 
     public Task<List<DeviceInfo>> GetDevicesAsync(CancellationToken ct)
     {
+        _pollCount++;
+        var isDetailedLog = _pollCount <= 3 || _pollCount % 60 == 0;
+
         if (!_sdkAvailable)
+        {
+            if (isDetailedLog)
+                Logger.Log("[Corsair] SDK not available, skipping poll");
             return Task.FromResult(new List<DeviceInfo>());
+        }
 
         if (!_connected)
         {
-            // SDK handles reconnection via its internal retry loop (session callback).
-            // Just return last known state until it connects.
+            if (isDetailedLog)
+                Logger.Log($"[Corsair] Not connected to iCUE (poll #{_pollCount}), returning {_lastGoodDevices.Count} cached device(s)");
             return Task.FromResult(_lastGoodDevices.ToList());
         }
 
@@ -215,11 +247,14 @@ public class CorsairProvider : IDeviceProvider
                 return Task.FromResult(_lastGoodDevices.ToList());
             }
 
-            if (!_loggedFirstPoll)
+            if (isDetailedLog)
             {
-                Logger.Log($"[Corsair] Found {count} device(s) total");
+                Logger.Log($"[Corsair] CorsairGetDevices returned {count} device(s) (poll #{_pollCount})");
                 for (int j = 0; j < count; j++)
-                    Logger.Log($"[Corsair]   #{j}: model=\"{devices[j].model}\" type=0x{devices[j].type:X} id=\"{devices[j].id?[..Math.Min(devices[j].id?.Length ?? 0, 30)]}\"");
+                {
+                    var d = devices[j];
+                    Logger.Log($"[Corsair]   #{j}: model=\"{d.model}\" serial=\"{d.serial}\" type=0x{d.type:X} ({ClassifyCorsairDevice(d.type)}) id=\"{d.id?[..Math.Min(d.id?.Length ?? 0, 40)]}\" ledCount={d.ledCount} channels={d.channelCount}");
+                }
             }
 
             var results = new List<DeviceInfo>();
@@ -227,16 +262,21 @@ public class CorsairProvider : IDeviceProvider
             for (int i = 0; i < count; i++)
             {
                 var dev = devices[i];
+                var deviceTypeName = ClassifyCorsairDevice(dev.type);
 
                 // Only care about wireless device types that can have battery
                 if ((dev.type & (CDT_Mouse | CDT_Keyboard | CDT_Headset)) == 0)
+                {
+                    if (isDetailedLog)
+                        Logger.Log($"[Corsair] Skipping device \"{dev.model}\" — type 0x{dev.type:X} is not mouse/keyboard/headset");
                     continue;
+                }
 
                 var info = new DeviceInfo
                 {
                     Id = $"corsair-{dev.id}",
                     Vendor = "Corsair",
-                    DeviceType = ClassifyCorsairDevice(dev.type),
+                    DeviceType = deviceTypeName,
                     DisplayName = dev.model,
                     Connected = true,
                     Source = "iCUESDK",
@@ -251,8 +291,8 @@ public class CorsairProvider : IDeviceProvider
                     System.Text.Encoding.ASCII.GetBytes(dev.id ?? "", deviceIdBytes);
                     var readErr = CorsairReadDeviceProperty(deviceIdBytes, CDPI_BatteryLevel, 0, out prop);
 
-                    if (!_loggedFirstPoll)
-                        Logger.Log($"[Corsair] ReadDeviceProperty({dev.model}, BatteryLevel): err={readErr}, type={prop.type}, rawValue=0x{prop.value:X16}");
+                    if (isDetailedLog)
+                        Logger.Log($"[Corsair] ReadDeviceProperty(\"{dev.model}\", BatteryLevel): err={readErr}, type={prop.type}, rawValue=0x{prop.value:X16}");
 
                     if (readErr == CE_Success)
                     {
@@ -263,40 +303,41 @@ public class CorsairProvider : IDeviceProvider
                         }
                         else
                         {
-                            // Try interpreting raw value anyway
                             battery = (int)(prop.value & 0xFFFFFFFF);
-                            Logger.Log($"[Corsair] {dev.model}: unexpected property type {prop.type}, trying raw int interpretation: {battery}");
+                            Logger.Log($"[Corsair] {dev.model}: unexpected property type {prop.type} (expected CT_Int32={CT_Int32}), trying raw int interpretation: {battery}");
                         }
 
                         info.BatteryPercent = Math.Clamp(battery, 0, 100);
-                        if (!_loggedFirstPoll)
-                            Logger.Log($"[Corsair] {dev.model}: battery={info.BatteryPercent}%");
+                        if (isDetailedLog)
+                            Logger.Log($"[Corsair] {dev.model}: battery={info.BatteryPercent}% (raw={battery})");
                         CorsairFreeProperty(ref prop);
                     }
                     else
                     {
                         // Error reading battery — device might be wired or battery not supported
-                        // Still add it but without battery info so user sees it as connected
-                        Logger.Log($"[Corsair] {dev.model}: battery read error {readErr} (device may not have battery)");
+                        if (isDetailedLog)
+                            Logger.Log($"[Corsair] {dev.model}: battery read error {readErr} — skipping device (wired or no battery support)");
                         continue;
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log($"[Corsair] Battery read exception for {dev.model}: {ex.Message}");
+                    Logger.Log($"[Corsair] Battery read exception for {dev.model}: {ex.GetType().Name}: {ex.Message}");
                     continue;
                 }
 
                 results.Add(info);
             }
 
-            _loggedFirstPoll = true;
+            if (isDetailedLog)
+                Logger.Log($"[Corsair] Poll result: {results.Count} device(s) with battery — [{string.Join(", ", results.Select(r => $"{r.DisplayName}({r.BatteryPercent}%)"))}]");
+
             _lastGoodDevices = results;
             return Task.FromResult(results);
         }
         catch (Exception ex)
         {
-            Logger.Log($"[Corsair] GetDevices failed: {ex.Message}");
+            Logger.Log($"[Corsair] GetDevices failed: {ex.GetType().Name}: {ex.Message}");
             _connected = false;
             return Task.FromResult(_lastGoodDevices.ToList());
         }

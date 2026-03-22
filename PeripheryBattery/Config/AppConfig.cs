@@ -10,14 +10,11 @@ public class AppConfig
     public bool ShowNotifications { get; set; } = true;
     public bool StartWithWindows { get; set; } = false;
     public int IconCycleSeconds { get; set; } = 3;
+    public bool EnableLogging { get; set; } = true;
 
     // Device name overrides: map detected name substring -> friendly name
-    public Dictionary<string, string> DeviceNameOverrides { get; set; } = new()
-    {
-        { "DeathAdder", "DeathAdder V3 Pro" },
-        { "G915 TKL", "G915 TKL" },
-        { "PRO X 2", "PRO X 2 Headset" },
-    };
+    // Example: { "DeathAdder": "My Mouse" } would rename any device containing "DeathAdder"
+    public Dictionary<string, string> DeviceNameOverrides { get; set; } = new();
 
     private static readonly string ConfigDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

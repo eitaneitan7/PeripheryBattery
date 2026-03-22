@@ -30,7 +30,11 @@ public class LogitechProvider : IDeviceProvider
         { "speaker", "Speaker" },
     };
 
-    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken ct)
+    {
+        Logger.Log("[Logitech] Provider starting, will attempt G HUB WebSocket connection on first poll");
+        return Task.CompletedTask;
+    }
 
     public async Task StopAsync()
     {

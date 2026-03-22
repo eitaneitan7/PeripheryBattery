@@ -53,8 +53,12 @@ public class DeviceManager : IDisposable
             TimeSpan.FromSeconds(_config.PollIntervalSeconds));
     }
 
+    private int _pollCount;
+
     private async Task PollAsync()
     {
+        _pollCount++;
+        var isDetailedLog = _pollCount <= 3 || _pollCount % 60 == 0;
         var allDevices = new List<DeviceInfo>();
 
         foreach (var provider in _providers)
@@ -62,9 +66,16 @@ public class DeviceManager : IDisposable
             try
             {
                 var devices = await provider.GetDevicesAsync(_cts?.Token ?? CancellationToken.None);
+
+                if (isDetailedLog && devices.Count > 0)
+                    Logger.Log($"[DeviceManager] {provider.Vendor} returned {devices.Count} device(s): [{string.Join(", ", devices.Select(d => $"{d.DisplayName}({d.BatteryPercent?.ToString() ?? "?"}%)"))}]");
+
                 foreach (var d in devices)
                 {
+                    var original = d.DisplayName;
                     d.DisplayName = _config.ApplyNameOverride(d.DisplayName);
+                    if (isDetailedLog && d.DisplayName != original)
+                        Logger.Log($"[DeviceManager] Name override: \"{original}\" -> \"{d.DisplayName}\"");
                 }
                 allDevices.AddRange(devices);
             }
@@ -72,6 +83,20 @@ public class DeviceManager : IDisposable
             {
                 Logger.Log($"[DeviceManager] Poll failed for {provider.Vendor}: {ex.Message}");
             }
+        }
+
+        // Log summary of all devices
+        if (isDetailedLog)
+        {
+            Logger.Log($"[DeviceManager] Poll #{_pollCount} complete: {allDevices.Count} total device(s)");
+            foreach (var d in allDevices)
+                Logger.Log($"[DeviceManager]   [{d.Vendor}] {d.DisplayName}: {d.StatusText} (id={d.Id}, type={d.DeviceType}, source={d.Source})");
+
+            // Warn about potential duplicates (same display name from different sources)
+            var dupes = allDevices.GroupBy(d => d.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1);
+            foreach (var g in dupes)
+                Logger.Log($"[DeviceManager] WARNING: Duplicate display name \"{g.Key}\" from sources: {string.Join(", ", g.Select(d => d.Source))}");
         }
 
         Devices = allDevices;

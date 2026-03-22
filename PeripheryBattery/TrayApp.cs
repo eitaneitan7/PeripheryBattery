@@ -29,6 +29,7 @@ public class TrayApp : ApplicationContext
     public TrayApp()
     {
         _config = AppConfig.Load();
+        Logger.Enabled = _config.EnableLogging;
         Logger.Log("=== PeripheryBattery starting ===");
         Logger.Log($"Config: poll={_config.PollIntervalSeconds}s, lowBattery={_config.LowBatteryThreshold}%");
 
