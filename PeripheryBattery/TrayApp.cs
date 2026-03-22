@@ -191,14 +191,14 @@ public class TrayApp : ApplicationContext
 
         menu.Items.Add("Open Log", null, (_, _) =>
         {
-            try { System.Diagnostics.Process.Start("notepad.exe", Logger.LogFilePath); }
-            catch { }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("notepad.exe", $"\"{Logger.LogFilePath}\"") { UseShellExecute = true }); }
+            catch (Exception ex) { Logger.Log($"[TrayApp] Failed to open log: {ex.Message}"); }
         });
 
         menu.Items.Add("Open Config", null, (_, _) =>
         {
-            try { System.Diagnostics.Process.Start("notepad.exe", AppConfig.ConfigFilePath); }
-            catch { }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("notepad.exe", $"\"{AppConfig.ConfigFilePath}\"") { UseShellExecute = true }); }
+            catch (Exception ex) { Logger.Log($"[TrayApp] Failed to open config: {ex.Message}"); }
         });
 
         menu.Items.Add(new ToolStripSeparator());
